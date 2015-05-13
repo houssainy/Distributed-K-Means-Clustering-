@@ -28,12 +28,13 @@ import org.apache.hadoop.mapred.TextOutputFormat;
 public class DSKMeans {
 	private final static String CENTROIDS_FILE_PATH = "input/centroids.txt";
 	private final static String TEMP_FILE_PATH = "temp/temp_centroids.txt";
-	private final static String FINAL_OUTPUT_FILE_PATH = "output/final_centroids.txt";
+	// private final static String FINAL_OUTPUT_FILE_PATH =
+	// "output/final_centroids.txt";
 
 	private static String outPath = "output/";
 	private static String tempPath = "temp/";
 
-	private final static double epsoln = 0.001;
+	private final static double epsoln = 0.0001;
 
 	private final static int n = 1024; // Number of features
 
@@ -59,36 +60,12 @@ public class DSKMeans {
 						return;
 					recordData.add(Float.parseFloat(token));
 				}
-
 				i++;
 			}
+			if (i < 2)
+				return;
 			String newCentroid = getNearestCentroid(recordData, centroids);
 			output.collect(new Text(newCentroid), val);
-		}
-
-		private Hashtable<String, ArrayList<Float>> readCentroids(
-				String centroidsFilePath) throws IOException {
-
-			Hashtable<String, ArrayList<Float>> centroids = new Hashtable<String, ArrayList<Float>>();
-
-			FileSystem fs = FileSystem.get(new Configuration());
-			BufferedReader br = new BufferedReader(new InputStreamReader(
-					fs.open(new Path(centroidsFilePath))));
-
-			String line;
-			String[] temp;
-
-			while ((line = br.readLine()) != null) {
-				temp = line.split(" ");
-
-				ArrayList<Float> features = new ArrayList<Float>();
-				// first element is character Ci
-				for (int i = 1; i < temp.length; i++)
-					features.add(Float.parseFloat(temp[i]));
-
-				centroids.put(temp[0], features);
-			}
-			return centroids;
 		}
 	}
 
@@ -160,7 +137,7 @@ public class DSKMeans {
 				while (itr.hasMoreTokens()) {
 					token = itr.nextToken();
 					if (i > 1)
-						newCoordinates[i] += Float.parseFloat(token);
+						newCoordinates[i - 2] += Float.parseFloat(token);
 
 					i++;
 				}
@@ -173,6 +150,40 @@ public class DSKMeans {
 		}
 	}
 
+	public static class KMeansOutputMapper extends MapReduceBase implements
+			Mapper<LongWritable, Text, Text, Text> {
+
+		@Override
+		public void map(LongWritable key, Text val,
+				OutputCollector<Text, Text> output, Reporter reporter)
+				throws IOException {
+			Hashtable<String, ArrayList<Float>> centroids = readCentroids(CENTROIDS_FILE_PATH);
+
+			StringTokenizer itr = new StringTokenizer(val.toString());
+
+			String imageUrl = itr.nextToken();
+
+			int i = 1;
+			ArrayList<Float> recordData = new ArrayList<Float>();
+			String token;
+			while (itr.hasMoreTokens()) {
+				// First two records are the image_url and lush string
+				token = itr.nextToken();
+				if (i > 1) {
+					if (token.equals("MISSING"))
+						return;
+					recordData.add(Float.parseFloat(token));
+				}
+				i++;
+			}
+			if (i < 2)
+				return;
+
+			String centroid = getNearestCentroid(recordData, centroids);
+			output.collect(new Text(imageUrl), new Text(centroid));
+		}
+	}
+
 	/**
 	 * 
 	 * @param args
@@ -181,8 +192,9 @@ public class DSKMeans {
 	 *            args[1] = output path
 	 * 
 	 *            args[2] = Number of clusters "K"
+	 * @throws IOException
 	 */
-	public static void main(String[] args) {
+	public static void main(String[] args) throws IOException {
 		// Set configuration of the Job
 		JobConf conf = new JobConf(DSKMeans.class);
 		conf.setJobName("KMeans");
@@ -202,22 +214,41 @@ public class DSKMeans {
 		conf.setInputFormat(TextInputFormat.class);
 		conf.setOutputFormat(TextOutputFormat.class);
 
-		try {
-			int k = Integer.parseInt(args[2]);
-			generateRandomCentroids(k, n, FileSystem.get(conf));
+		int k = Integer.parseInt(args[2]);
+		generateRandomCentroids(k, n, FileSystem.get(conf));
 
-			FileSystem.get(conf).delete(new Path(outPath), true);
-			FileSystem.get(conf).delete(new Path(TEMP_FILE_PATH), true);
-			
-			do {
-				JobClient jobClient = new JobClient();
-				jobClient.setConf(conf);
-				JobClient.runJob(conf);
-			} while (!isDone(FileSystem.get(conf)));
+		FileSystem.get(conf).delete(new Path(outPath), true);
+		FileSystem.get(conf).delete(new Path(TEMP_FILE_PATH), true);
 
-		} catch (Exception e1) {
-			e1.printStackTrace();
-		}
+		int i = 1;
+		do {
+			System.out.println("Iteration " + i++);
+			JobClient jobClient = new JobClient();
+			jobClient.setConf(conf);
+			JobClient.runJob(conf);
+		} while (!isDone(FileSystem.get(conf)));
+
+		// OutputJob
+		// Set configuration of the Job
+		conf = new JobConf(DSKMeans.class);
+		conf.setJobName("KMeans");
+
+		conf.setOutputKeyClass(Text.class);
+		conf.setOutputValueClass(Text.class);
+
+		TextInputFormat.addInputPath(conf, new Path(args[0]));
+		TextOutputFormat.setOutputPath(conf, new Path(outPath));
+
+		// Set Mapper and Reducer
+		conf.setMapperClass(KMeansOutputMapper.class);
+		conf.setNumReduceTasks(0);
+
+		conf.setInputFormat(TextInputFormat.class);
+		conf.setOutputFormat(TextOutputFormat.class);
+
+		JobClient jobClient = new JobClient();
+		jobClient.setConf(conf);
+		JobClient.runJob(conf);
 	}
 
 	private static void generateRandomCentroids(int k, int n, FileSystem fs)
@@ -253,7 +284,7 @@ public class DSKMeans {
 			centroids.put(temp[0], temp[1]);
 		}
 		br.close();
-		
+
 		br = new BufferedReader(new InputStreamReader(fs.open(new Path(
 				TEMP_FILE_PATH))));
 
@@ -264,7 +295,7 @@ public class DSKMeans {
 			tempCentroids.put(temp[0], temp[1]);
 		}
 		br.close();
-		
+
 		String[] records;
 		String[] tempRecords;
 		boolean isDone = true;
@@ -286,15 +317,10 @@ public class DSKMeans {
 			}
 		}
 
-		String filePath = "";
-		if (!isDone) {
-			// Delete OutputPath
-			fs.delete(new Path(outPath), true);
-			filePath = CENTROIDS_FILE_PATH;
-		} else {
+		if (isDone) {
 			fs.delete(new Path(tempPath), true);
-			filePath = FINAL_OUTPUT_FILE_PATH;
 		}
+		String filePath = CENTROIDS_FILE_PATH;
 
 		// Update centroid file
 		BufferedWriter out = new BufferedWriter(new PrintWriter(
@@ -303,6 +329,8 @@ public class DSKMeans {
 			out.write(key + " " + tempCentroids.get(key) + "\n");
 		}
 		out.close();
+
+		fs.delete(new Path(outPath), true);
 		return isDone;
 	}
 
@@ -311,14 +339,14 @@ public class DSKMeans {
 
 		Hashtable<Float, String> distanceToKeyContainer = new Hashtable<Float, String>();
 
-		int dist = 0;
+		float dist = 0;
 
 		for (String key : centroids.keySet()) {
 			ArrayList<Float> data = centroids.get(key);
 			for (int j = 0; j < recordData.size(); j++) {
-				dist += Math.pow(data.get(j) - recordData.get(j), 2);
+				dist += Math.abs(data.get(j) - recordData.get(j));
 			}
-			distanceToKeyContainer.put((float) Math.sqrt(dist), key);
+			distanceToKeyContainer.put(dist, key);
 			dist = 0;
 		}
 
@@ -331,7 +359,31 @@ public class DSKMeans {
 				minCentroidLabel = distanceToKeyContainer.get(val);
 			}
 		}
-		System.out.println(minCentroidLabel);
 		return minCentroidLabel;
+	}
+
+	private static Hashtable<String, ArrayList<Float>> readCentroids(
+			String centroidsFilePath) throws IOException {
+
+		Hashtable<String, ArrayList<Float>> centroids = new Hashtable<String, ArrayList<Float>>();
+
+		FileSystem fs = FileSystem.get(new Configuration());
+		BufferedReader br = new BufferedReader(new InputStreamReader(
+				fs.open(new Path(centroidsFilePath))));
+
+		String line;
+		String[] temp;
+
+		while ((line = br.readLine()) != null) {
+			temp = line.split(" ");
+
+			ArrayList<Float> features = new ArrayList<Float>();
+			// first element is character Ci
+			for (int i = 1; i < temp.length; i++)
+				features.add(Float.parseFloat(temp[i]));
+
+			centroids.put(temp[0], features);
+		}
+		return centroids;
 	}
 }
